@@ -2,7 +2,7 @@
 
 | Скилл | Когда применять | Инструкция |
 | --- | --- | --- |
-| task-start | Начать задачу, создать папку и сформулировать постановку | [.agents/skills/task-start/SKILL.md](.agents/skills/task-start/SKILL.md) |
+| task-start | Создать контекст в текущей или указанной директории | [.agents/skills/task-start/SKILL.md](.agents/skills/task-start/SKILL.md) |
 | context-sync | Учесть выполненную работу, уточнить контекст, подготовить новый диалог | [.agents/skills/context-sync/SKILL.md](.agents/skills/context-sync/SKILL.md) |
 | context-handoff | Подготовить новый диалог или продолжить после восстановления контекста | [.agents/skills/context-handoff/SKILL.md](.agents/skills/context-handoff/SKILL.md) |
 

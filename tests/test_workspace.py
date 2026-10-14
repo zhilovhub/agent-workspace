@@ -1,4 +1,4 @@
-"""Test task creation in temporary directories."""
+"""Task initialization and user-skill installation in temporary directories."""
 from pathlib import Path
 import shutil
 import subprocess
@@ -13,14 +13,17 @@ class WorkspaceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-        for folder in ("scripts", "templates"):
-            shutil.copytree(SOURCE / folder, self.root / folder)
+        self.root = Path(self.temp.name).resolve()
+        self.bundle = self.root / "bundle"
+        for folder in ("scripts", "templates", ".agents"):
+            shutil.copytree(SOURCE / folder, self.bundle / folder)
+        self.project = self.root / "unrelated directory" / "kitchen"
+        self.project.mkdir(parents=True)
 
     def cli(self, *args, ok=True):
         result = subprocess.run(
-            [sys.executable, str(self.root / "scripts/workspace.py"), *args],
-            cwd=self.temp.name, capture_output=True, text=True,
+            [sys.executable, str(self.bundle / "scripts/workspace.py"), *args],
+            cwd=self.project, capture_output=True, text=True,
         )
         if ok:
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -28,39 +31,81 @@ class WorkspaceTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
         return result.stdout
 
-    def test_new_creates_context_and_artifacts(self):
-        self.cli("new", "sample", "--title", "Ремонт кухни")
-        task = self.root / "projects/sample"
-        self.assertIn("Ремонт кухни", (task / "BRIEF.md").read_text())
-        self.assertTrue((task / "artifacts").is_dir())
-        self.assertEqual({p.name for p in task.iterdir()}, {
-            "AGENTS.md", "BRIEF.md", "STATE.md", "DECISIONS.md", "artifacts"
+    def test_current_directory_is_destination_and_context_is_portable(self):
+        self.cli("init", "--title", "Ремонт кухни")
+        self.assertIn("Ремонт кухни", (self.project / "BRIEF.md").read_text())
+        self.assertTrue((self.project / "artifacts").is_dir())
+        self.assertEqual({p.name for p in self.project.iterdir()}, {
+            "AGENTS.md", "BRIEF.md", "STATE.md", "DECISIONS.md", "SKILLS.md", "artifacts"
         })
-        self.assertNotIn("{{DATE}}", (task / "STATE.md").read_text())
+        self.assertFalse((self.bundle / "projects").exists())
+        self.assertNotIn("{{DATE}}", (self.project / "STATE.md").read_text())
+        rules = (self.project / "AGENTS.md").read_text()
+        self.assertNotIn("../../", rules)
+        self.assertNotIn(str(self.bundle), rules)
 
-    def test_refuses_overwrite(self):
-        self.cli("new", "sample")
-        state = self.root / "projects/sample/STATE.md"
-        state.write_text("User notes")
-        self.cli("new", "sample", ok=False)
-        self.assertEqual(state.read_text(), "User notes")
+    def test_explicit_directory_preserves_unrelated_files(self):
+        target = self.root / "chosen path"
+        target.mkdir()
+        (target / "notes.txt").write_text("User notes")
+        (target / "artifacts").mkdir()
+        (target / "artifacts/result.txt").write_text("Result")
+        self.cli("init", str(target))
+        self.assertEqual((target / "notes.txt").read_text(), "User notes")
+        self.assertEqual((target / "artifacts/result.txt").read_text(), "Result")
+        self.assertTrue((target / "BRIEF.md").exists())
+        self.assertEqual(list(self.project.iterdir()), [])
 
-    def test_refuses_path_escape(self):
-        self.cli("new", "../escape", ok=False)
-        self.assertFalse((self.root / "escape").exists())
-        self.assertFalse((self.root / "projects").exists())
+    def test_any_context_conflict_prevents_all_writes(self):
+        (self.project / "STATE.md").write_text("User notes")
+        self.cli("init", ok=False)
+        self.assertEqual((self.project / "STATE.md").read_text(), "User notes")
+        self.assertEqual({p.name for p in self.project.iterdir()}, {"STATE.md"})
 
-    def test_refuses_symlinked_projects(self):
-        outside = self.root / "outside"
-        outside.mkdir()
-        (self.root / "projects").symlink_to(outside, target_is_directory=True)
-        self.cli("new", "sample", ok=False)
-        self.assertEqual(list(outside.iterdir()), [])
+    def test_refuses_artifacts_symlink_and_file(self):
+        artifacts = self.project / "artifacts"
+        artifacts.symlink_to(self.root, target_is_directory=True)
+        self.cli("init", ok=False)
+        self.assertFalse((self.project / "AGENTS.md").exists())
+        artifacts.unlink()
+        artifacts.write_text("Existing file")
+        self.cli("init", ok=False)
+        self.assertEqual(artifacts.read_text(), "Existing file")
 
-    def test_missing_template_does_not_leave_partial_task(self):
-        (self.root / "templates/task/DECISIONS.md").unlink()
-        self.cli("new", "sample", ok=False)
-        self.assertFalse((self.root / "projects/sample").exists())
+    def test_missing_template_prevents_partial_initialization(self):
+        (self.bundle / "templates/task/DECISIONS.md").unlink()
+        self.cli("init", ok=False)
+        self.assertEqual(list(self.project.iterdir()), [])
+
+    def test_install_links_are_idempotent_and_source_can_be_resolved(self):
+        destination = self.root / "user-skills"
+        self.cli("install", "--skills-dir", str(destination))
+        self.cli("install", "--skills-dir", str(destination))
+        for name in ("task-start", "context-sync", "context-handoff"):
+            link = destination / name
+            self.assertTrue(link.is_symlink())
+            source = self.bundle / ".agents/skills" / name
+            self.assertEqual(link.resolve(), source)
+            self.assertEqual((link / "SKILL.md").resolve().parent.parents[2], self.bundle)
+        self.assertEqual(list(self.project.iterdir()), [])
+
+    def test_install_preserves_existing_skills_before_any_write(self):
+        destination = self.root / "user-skills"
+        existing = destination / "context-handoff"
+        existing.mkdir(parents=True)
+        (existing / "SKILL.md").write_text("User skill")
+        self.cli("install", "--skills-dir", str(destination), ok=False)
+        self.assertEqual((existing / "SKILL.md").read_text(), "User skill")
+        self.assertEqual({p.name for p in destination.iterdir()}, {"context-handoff"})
+
+    def test_install_preserves_broken_links(self):
+        destination = self.root / "user-skills"
+        destination.mkdir()
+        link = destination / "context-sync"
+        link.symlink_to(self.root / "missing")
+        self.cli("install", "--skills-dir", str(destination), ok=False)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual({p.name for p in destination.iterdir()}, {"context-sync"})
 
 
 if __name__ == "__main__":
